@@ -4,7 +4,6 @@ import serial
 import sys
 import os
 import time
-import csv
 
 STEP_SIZES = {
     '0': '5.0 kHz',
@@ -205,47 +204,39 @@ def slowwrite(ser, data, delay=1):
 def parse_reply(reply):
     if reply == "N":
         return None
-    command,args = reply.split(" ", 2)
-    args = args.split(",")
-    return [command]+args
-
-ser = serial.Serial()
-ser.port = "/dev/cu.usbserial"
-#ser.port = "/dev/cu.PL2303-0000101D"
-ser.baudrate = 9600
-ser.parity = 'N'
-ser.rtscts = False
-ser.xonxoff = False
-ser.timeout = 2
-ser.interCharTimeout = 1
-
-try:
-    ser.open()
-except serial.SerialException, e:
-    sys.stderr.write("Could not open serial port %s: %s\n" % (ser.portstr, e))
-    sys.exit(1)
-
-ser.write("ID\r")
-print >>sys.stderr, readline(ser)
-
-channels = ["%03d" % i for i in range(0,399)] + [i+str(j) for i in ("L", "U", "I-") for j in range(0,9)] + ["PR1", "PR2"]
-
-cwr = csv.writer(sys.stdout)
-cwr.writerow(["Channel", "Name", "Frequency", "Step", "Shift", "Reverse", "Tone", "Tone Freq", "DCS code", "Offset", "Mode", "Lockout"])
-
-for c in channels:
-    ser.write("MR 0,"+c+"\r")
-    rx = parse_reply(readline(ser))
-    ser.write("MR 1,"+c+"\r")
-    tx = parse_reply(readline(ser))
-    ser.write("MNA "+c+"\r")
-    name = parse_reply(readline(ser))
-    if name:
-        name = name[2]
-    if not rx:
-        rx = [None]*9
+    if " " in reply:
+        command,args = reply.split(" ", 1)
+        args = args.split(",")
+        return [command]+args
     else:
-        freq, step, shift, rev, tone, ctcss, dcs, tone_freq, ctcss_freq, dcs_code, offset, mode, lockout = rx[3:]
+        return [reply]
+
+def open(port="/dev/cu.usbserial"):
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = 9600
+    ser.parity = 'N'
+    ser.rtscts = False
+    ser.xonxoff = False
+    ser.timeout = 2
+    ser.interCharTimeout = 1
+
+    try:
+        ser.open()
+    except serial.SerialException, e:
+        sys.stderr.write("Could not open serial port %s: %s\n" % (ser.portstr, e))
+        raise
+    time.sleep(1)
+    ser.write("ID\r")
+    print >>sys.stderr, "Found radio:", readline(ser)
+    return ser
+
+CHANNELS = ["%03d" % i for i in range(0,399)] + [i+str(j) for i in ("L", "U", "I-") for j in range(0,9)] + ["PR1", "PR2"]
+
+class freq(object):
+    @classmethod
+    def radio2human(cls,f):
+        freq, step, shift, rev, tone, ctcss, dcs, tone_freq, ctcss_freq, dcs_code, offset, mode, lockout = f
         if len(freq) == 11:
             freq = freq[:5]+"."+freq[5:]
         step = STEP_SIZES.get(step, step)
@@ -263,6 +254,54 @@ for c in channels:
         dcs_code = DCS_CODE.get(dcs_code, dcs_code)
         mode = MODE.get(mode, mode)
         offset = offset[:3]+"."+offset[3:]
-        rx = [freq,step,shift,rev,tone, tone_freq, dcs_code, offset, mode, lockout]
+        return [freq,step,shift,rev,tone, tone_freq, dcs_code, offset, mode, lockout]
+
+    @classmethod
+    def findrevmatch(cls,d,input,default='0'):
+        for k,v in d.iteritems():
+            if (input and v.startswith(input)) or (v == input):
+                return k
+        return default
+
+    @classmethod
+    def parsebool(cls, v):
+        try:
+            return str(int(v))
+        except:
+            return str(int(bool(v)))
+
+    @classmethod
+    def human2radio(cls,f):
+        freq,step,shift,rev,tone,tone_freq,dcs_code,offset,mode,lockout = f
+
+        freq = "%011d" % (float(freq)*1000000)
+        step = cls.findrevmatch(STEP_SIZES, step+".", cls.findrevmatch(STEP_SIZES, step))
+        shift = cls.findrevmatch(SHIFT, shift)
+        rev = cls.parsebool(rev)
+        ctcss, dcs = '0', '0'
+        if tone == "D":
+            dcs = '1'
+            tone = '0'
+        elif tone == "C":
+            ctcss = '1'
+            tone = '0'
+        elif tone:
+            tone = '1'
+        else:
+            tone = '0'
+        tone_freq = cls.findrevmatch(TONE_FREQ, tone_freq, '00')
+        ctcss_freq = tone_freq
+        dcs_code = cls.findrevmatch(DCS_CODE, dcs_code, '000')
+        if shift != '0':
+            offset = "%09d" % (float(offset) * 1000000)
+        else:
+            offset = "000000000"
+        mode = cls.findrevmatch(MODE, mode)
+        lockout = cls.parsebool(lockout)
+        return [freq, step, shift, rev, tone, ctcss, dcs, tone_freq, ctcss_freq, dcs_code, offset, mode, lockout]
+
+if __name__ == "__main__":
+    ser = open()
+    ser.write("MES\r")
+    print parse_reply(readline(ser))
     
-    cwr.writerow([c, name]+rx)
